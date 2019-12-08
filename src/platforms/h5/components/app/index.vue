@@ -11,17 +11,16 @@
       v-show="showTabBar"
       v-bind="tabBar" />
     <toast
-      v-bind="showToast"
-      @close="_onModalClose" />
+      v-if="$options.components.Toast"
+      v-bind="showToast"/>
     <action-sheet
+      v-if="$options.components.ActionSheet"
       v-bind="showActionSheet"
       @close="_onActionSheetClose" />
     <modal
+      v-if="$options.components.Modal"
       v-bind="showModal"
       @close="_onModalClose" />
-    <picker
-      v-bind="showPicker"
-      @close="_onPickerClose" />
   </uni-app>
 </template>
 <script>
@@ -35,7 +34,7 @@ import {
 
 import components from './components'
 
-import mixins from './popup/mixins'
+import mixins from 'uni-h5-app-mixins'
 
 export default {
   name: 'App',

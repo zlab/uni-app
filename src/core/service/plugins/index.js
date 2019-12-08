@@ -1,12 +1,8 @@
 import VueRouter from 'vue-router'
 
 import {
-  isFn
-} from 'uni-shared'
-
-import {
   isPage
-} from 'uni-helpers'
+} from 'uni-helpers/index'
 
 import {
   createAppMixin
@@ -15,6 +11,10 @@ import {
 import {
   createPageMixin
 } from './page'
+
+import {
+  lifecycleMixin
+} from './lifecycle'
 
 import {
   getTabBarScrollPosition
@@ -56,6 +56,8 @@ export default {
   install (Vue, {
     routes
   } = {}) {
+    lifecycleMixin(Vue)
+
     const minId = getMinId(routes)
     const router = new VueRouter({
       id: minId,
@@ -101,6 +103,11 @@ export default {
     if (__PLATFORM__ === 'h5') {
       if (entryRoute.meta && entryRoute.meta.name) {
         document.body.className = 'uni-body ' + entryRoute.meta.name
+        if (entryRoute.meta.isNVue) {
+          const nvueDirKey = 'nvue-dir-' + __uniConfig.nvue['flex-direction']
+          document.body.setAttribute('nvue', '')
+          document.body.setAttribute(nvueDirKey, '')
+        }
       }
     }
 
@@ -125,10 +132,10 @@ export default {
           options.router = router
 
           // onError
-          if (!isFn(options.onError)) {
-            options.onError = function (err) {
+          if (!Array.isArray(options.onError) || options.onError.length === 0) {
+            options.onError = [function (err) {
               console.error(err)
-            }
+            }]
           }
         } else if (isPage(this)) {
           const pageMixin = createPageMixin()

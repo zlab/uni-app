@@ -40,7 +40,198 @@ const camelize = cached((str) => {
   return str.replace(camelizeRE, (_, c) => c ? c.toUpperCase() : '')
 });
 
-const SYNC_API_RE = /^\$|getSubNVueById|requireNativePlugin|upx2px|hideKeyboard|canIUse|^create|Sync$|Manager$|base64ToArrayBuffer|arrayBufferToBase64/;
+const HOOKS = [
+  'invoke',
+  'success',
+  'fail',
+  'complete',
+  'returnValue'
+];
+
+const globalInterceptors = {};
+const scopedInterceptors = {};
+
+function mergeHook (parentVal, childVal) {
+  const res = childVal
+    ? parentVal
+      ? parentVal.concat(childVal)
+      : Array.isArray(childVal)
+        ? childVal : [childVal]
+    : parentVal;
+  return res
+    ? dedupeHooks(res)
+    : res
+}
+
+function dedupeHooks (hooks) {
+  const res = [];
+  for (let i = 0; i < hooks.length; i++) {
+    if (res.indexOf(hooks[i]) === -1) {
+      res.push(hooks[i]);
+    }
+  }
+  return res
+}
+
+function removeHook (hooks, hook) {
+  const index = hooks.indexOf(hook);
+  if (index !== -1) {
+    hooks.splice(index, 1);
+  }
+}
+
+function mergeInterceptorHook (interceptor, option) {
+  Object.keys(option).forEach(hook => {
+    if (HOOKS.indexOf(hook) !== -1 && isFn(option[hook])) {
+      interceptor[hook] = mergeHook(interceptor[hook], option[hook]);
+    }
+  });
+}
+
+function removeInterceptorHook (interceptor, option) {
+  if (!interceptor || !option) {
+    return
+  }
+  Object.keys(option).forEach(hook => {
+    if (HOOKS.indexOf(hook) !== -1 && isFn(option[hook])) {
+      removeHook(interceptor[hook], option[hook]);
+    }
+  });
+}
+
+function addInterceptor (method, option) {
+  if (typeof method === 'string' && isPlainObject(option)) {
+    mergeInterceptorHook(scopedInterceptors[method] || (scopedInterceptors[method] = {}), option);
+  } else if (isPlainObject(method)) {
+    mergeInterceptorHook(globalInterceptors, method);
+  }
+}
+
+function removeInterceptor (method, option) {
+  if (typeof method === 'string') {
+    if (isPlainObject(option)) {
+      removeInterceptorHook(scopedInterceptors[method], option);
+    } else {
+      delete scopedInterceptors[method];
+    }
+  } else if (isPlainObject(method)) {
+    removeInterceptorHook(globalInterceptors, method);
+  }
+}
+
+function wrapperHook (hook) {
+  return function (data) {
+    return hook(data) || data
+  }
+}
+
+function isPromise (obj) {
+  return !!obj && (typeof obj === 'object' || typeof obj === 'function') && typeof obj.then === 'function'
+}
+
+function queue (hooks, data) {
+  let promise = false;
+  for (let i = 0; i < hooks.length; i++) {
+    const hook = hooks[i];
+    if (promise) {
+      promise = Promise.then(wrapperHook(hook));
+    } else {
+      const res = hook(data);
+      if (isPromise(res)) {
+        promise = Promise.resolve(res);
+      }
+      if (res === false) {
+        return {
+          then () {}
+        }
+      }
+    }
+  }
+  return promise || {
+    then (callback) {
+      return callback(data)
+    }
+  }
+}
+
+function wrapperOptions (interceptor, options = {}) {
+  ['success', 'fail', 'complete'].forEach(name => {
+    if (Array.isArray(interceptor[name])) {
+      const oldCallback = options[name];
+      options[name] = function callbackInterceptor (res) {
+        queue(interceptor[name], res).then((res) => {
+          /* eslint-disable no-mixed-operators */
+          return isFn(oldCallback) && oldCallback(res) || res
+        });
+      };
+    }
+  });
+  return options
+}
+
+function wrapperReturnValue (method, returnValue) {
+  const returnValueHooks = [];
+  if (Array.isArray(globalInterceptors.returnValue)) {
+    returnValueHooks.push(...globalInterceptors.returnValue);
+  }
+  const interceptor = scopedInterceptors[method];
+  if (interceptor && Array.isArray(interceptor.returnValue)) {
+    returnValueHooks.push(...interceptor.returnValue);
+  }
+  returnValueHooks.forEach(hook => {
+    returnValue = hook(returnValue) || returnValue;
+  });
+  return returnValue
+}
+
+function getApiInterceptorHooks (method) {
+  const interceptor = Object.create(null);
+  Object.keys(globalInterceptors).forEach(hook => {
+    if (hook !== 'returnValue') {
+      interceptor[hook] = globalInterceptors[hook].slice();
+    }
+  });
+  const scopedInterceptor = scopedInterceptors[method];
+  if (scopedInterceptor) {
+    Object.keys(scopedInterceptor).forEach(hook => {
+      if (hook !== 'returnValue') {
+        interceptor[hook] = (interceptor[hook] || []).concat(scopedInterceptor[hook]);
+      }
+    });
+  }
+  return interceptor
+}
+
+function invokeApi (method, api, options, ...params) {
+  const interceptor = getApiInterceptorHooks(method);
+  if (interceptor && Object.keys(interceptor).length) {
+    if (Array.isArray(interceptor.invoke)) {
+      const res = queue(interceptor.invoke, options);
+      return res.then((options) => {
+        return api(wrapperOptions(interceptor, options), ...params)
+      })
+    } else {
+      return api(wrapperOptions(interceptor, options), ...params)
+    }
+  }
+  return api(options, ...params)
+}
+
+const promiseInterceptor = {
+  returnValue (res) {
+    if (!isPromise(res)) {
+      return res
+    }
+    return res.then(res => {
+      return res[1]
+    }).catch(res => {
+      return res[0]
+    })
+  }
+};
+
+const SYNC_API_RE =
+  /^\$|getMenuButtonBoundingClientRect|^report|interceptors|Interceptor$|getSubNVueById|requireNativePlugin|upx2px|hideKeyboard|canIUse|^create|Sync$|Manager$|base64ToArrayBuffer|arrayBufferToBase64/;
 
 const CONTEXT_API_RE = /^create|Manager$/;
 
@@ -54,7 +245,7 @@ function isSyncApi (name) {
 }
 
 function isCallbackApi (name) {
-  return CALLBACK_API_RE.test(name)
+  return CALLBACK_API_RE.test(name) && name !== 'onPush'
 }
 
 function handlePromise (promise) {
@@ -67,8 +258,8 @@ function handlePromise (promise) {
 function shouldPromise (name) {
   if (
     isContextApi(name) ||
-        isSyncApi(name) ||
-        isCallbackApi(name)
+    isSyncApi(name) ||
+    isCallbackApi(name)
   ) {
     return false
   }
@@ -81,10 +272,10 @@ function promisify (name, api) {
   }
   return function promiseApi (options = {}, ...params) {
     if (isFn(options.success) || isFn(options.fail) || isFn(options.complete)) {
-      return api(options, ...params)
+      return wrapperReturnValue(name, invokeApi(name, api, options, ...params))
     }
-    return handlePromise(new Promise((resolve, reject) => {
-      api(Object.assign({}, options, {
+    return wrapperReturnValue(name, handlePromise(new Promise((resolve, reject) => {
+      invokeApi(name, api, Object.assign({}, options, {
         success: resolve,
         fail: reject
       }), ...params);
@@ -100,7 +291,7 @@ function promisify (name, api) {
           )
         };
       }
-    }))
+    })))
   }
 }
 
@@ -146,14 +337,25 @@ function upx2px (number, newDeviceWidth) {
   return number < 0 ? -result : result
 }
 
+const interceptors = {
+  promiseInterceptor
+};
+
+
+
+var baseApi = /*#__PURE__*/Object.freeze({
+  upx2px: upx2px,
+  interceptors: interceptors,
+  addInterceptor: addInterceptor,
+  removeInterceptor: removeInterceptor
+});
+
 // 不支持的 API 列表
 const todos = [
   'saveImageToPhotosAlbum',
   'getRecorderManager',
   'getBackgroundAudioManager',
   'createInnerAudioContext',
-  'chooseVideo',
-  'saveVideoToPhotosAlbum',
   'createVideoContext',
   'createCameraContext',
   'createLivePlayerContext',
@@ -162,12 +364,7 @@ const todos = [
   'startAccelerometer',
   'startCompass',
   'addPhoneContact',
-  'setBackgroundColor',
-  'setBackgroundTextStyle',
-  'createIntersectionObserver',
   'authorize',
-  'openSetting',
-  'getSetting',
   'chooseAddress',
   'chooseInvoiceTitle',
   'addTemplate',
@@ -176,12 +373,12 @@ const todos = [
   'getTemplateLibraryList',
   'getTemplateList',
   'sendTemplateMessage',
-  'getUpdateManager',
   'setEnableDebug',
   'getExtConfig',
   'getExtConfigSync',
   'onWindowResize',
-  'offWindowResize'
+  'offWindowResize',
+  'saveVideoToPhotosAlbum'
 ];
 
 // 存在兼容性的 API 列表
@@ -194,7 +391,13 @@ const canIUses = [
   'setTabBarBadge',
   'removeTabBarBadge',
   'showTabBarRedDot',
-  'hideTabBarRedDot'
+  'hideTabBarRedDot',
+  'openSetting',
+  'getSetting',
+  'createIntersectionObserver',
+  'getUpdateManager',
+  'setBackgroundColor',
+  'setBackgroundTextStyle'
 ];
 
 function _handleNetworkInfo (result) {
@@ -348,6 +551,12 @@ const protocols = { // 需要做转换的 API 列表
       apFilePath: 'tempFilePath'
     }
   },
+  chooseVideo: {
+    // 支付宝小程序文档中未找到（仅在getSetting处提及），但实际可用
+    returnValue: {
+      apFilePath: 'tempFilePath'
+    }
+  },
   connectSocket: {
     args: {
       method: false,
@@ -430,9 +639,23 @@ const protocols = { // 需要做转换的 API 列表
   },
   scanCode: {
     name: 'scan',
-    args: {
-      onlyFromCamera: 'hideAlbum',
-      scanType: false
+    args (fromArgs) {
+      if (fromArgs.scanType === 'qrCode') {
+        fromArgs.type = 'qr';
+        return {
+          onlyFromCamera: 'hideAlbum'
+        }
+      } else if (fromArgs.scanType === 'barCode') {
+        fromArgs.type = 'bar';
+        return {
+          onlyFromCamera: 'hideAlbum'
+        }
+      } else {
+        return {
+          scanType: false,
+          onlyFromCamera: 'hideAlbum'
+        }
+      }
     },
     returnValue: {
       code: 'result'
@@ -483,6 +706,18 @@ const protocols = { // 需要做转换的 API 列表
       });
     }
   },
+  createBLEConnection: {
+    name: 'connectBLEDevice',
+    args: {
+      timeout: false
+    }
+  },
+  closeBLEConnection: {
+    name: 'disconnectBLEDevice'
+  },
+  onBLEConnectionStateChange: {
+    name: 'onBLEConnectionStateChanged'
+  },
   makePhoneCall: {
     args: {
       phoneNumber: 'number'
@@ -513,6 +748,9 @@ const protocols = { // 需要做转换的 API 列表
     returnValue: {
       brightness: 'value'
     }
+  },
+  showShareMenu: {
+    name: 'showSharePanel'
   }
 };
 
@@ -598,6 +836,7 @@ function wrapper (methodName, method) {
 const todoApis = Object.create(null);
 
 const TODOS = [
+  'onTabBarMidButtonTap',
   'subscribePush',
   'unsubscribePush',
   'onPush',
@@ -687,8 +926,6 @@ function $emit () {
   return apply(getEmitter(), '$emit', [...arguments])
 }
 
-
-
 var eventApi = /*#__PURE__*/Object.freeze({
   $on: $on,
   $off: $off,
@@ -727,11 +964,69 @@ function startGyroscope (params) {
   });
 }
 
+function createExecCallback (execCallback) {
+  return function wrapperExecCallback (res) {
+    this.actions.forEach((action, index) => {
+      (action._$callbacks || []).forEach(callback => {
+        callback(res[index]);
+      });
+    });
+    if (isFn(execCallback)) {
+      execCallback(res);
+    }
+  }
+}
+
+function addCallback (callback) {
+  if (isFn(callback)) {
+    const action = this.actions[this.actions.length - 1];
+    if (action) {
+      (action._$callbacks || (action._$callbacks = [])).push(callback);
+    }
+  }
+}
+
+function createSelectorQuery () {
+  const query = my.createSelectorQuery();
+
+  const oldExec = query.exec;
+  const oldScrollOffset = query.scrollOffset;
+  const oldBoundingClientRect = query.boundingClientRect;
+  query.exec = function exec (callback) {
+    return oldExec.call(this, createExecCallback(callback).bind(this))
+  };
+  query.scrollOffset = function scrollOffset (callback) {
+    const ret = oldScrollOffset.call(this);
+    addCallback.call(this, callback);
+    return ret
+  };
+  query.boundingClientRect = function boundingClientRect (callback) {
+    const ret = oldBoundingClientRect.call(this);
+    addCallback.call(this, callback);
+    return ret
+  };
+
+  if (!query.fields) {
+    query.fields = function ({ rect, size, scrollOffset } = {}, callback) {
+      if (rect || size) {
+        this.boundingClientRect();
+      }
+      if (scrollOffset) {
+        this.scrollOffset();
+      }
+      addCallback.call(this, callback);
+      return this
+    };
+  }
+  return query
+}
+
 var api = /*#__PURE__*/Object.freeze({
   setStorageSync: setStorageSync,
   getStorageSync: getStorageSync,
   removeStorageSync: removeStorageSync,
-  startGyroscope: startGyroscope
+  startGyroscope: startGyroscope,
+  createSelectorQuery: createSelectorQuery
 });
 
 const PAGE_EVENT_HOOKS = [
@@ -752,22 +1047,56 @@ function initMocks (vm, mocks) {
   });
 }
 
-function initHooks (mpOptions, hooks) {
+function hasHook (hook, vueOptions) {
+  if (!vueOptions) {
+    return true
+  }
+
+  if (Vue.options && Array.isArray(Vue.options[hook])) {
+    return true
+  }
+
+  vueOptions = vueOptions.default || vueOptions;
+
+  if (isFn(vueOptions)) {
+    if (isFn(vueOptions.extendOptions[hook])) {
+      return true
+    }
+    if (vueOptions.super &&
+      vueOptions.super.options &&
+      Array.isArray(vueOptions.super.options[hook])) {
+      return true
+    }
+    return false
+  }
+
+  if (isFn(vueOptions[hook])) {
+    return true
+  }
+  const mixins = vueOptions.mixins;
+  if (Array.isArray(mixins)) {
+    return !!mixins.find(mixin => hasHook(hook, mixin))
+  }
+}
+
+function initHooks (mpOptions, hooks, vueOptions) {
   hooks.forEach(hook => {
-    mpOptions[hook] = function (args) {
-      return this.$vm && this.$vm.__call_hook(hook, args)
-    };
+    if (hasHook(hook, vueOptions)) {
+      mpOptions[hook] = function (args) {
+        return this.$vm && this.$vm.__call_hook(hook, args)
+      };
+    }
   });
 }
 
-function initVueComponent (Vue$$1, vueOptions) {
+function initVueComponent (Vue, vueOptions) {
   vueOptions = vueOptions.default || vueOptions;
   let VueComponent;
   if (isFn(vueOptions)) {
     VueComponent = vueOptions;
     vueOptions = VueComponent.extendOptions;
   } else {
-    VueComponent = Vue$$1.extend(vueOptions);
+    VueComponent = Vue.extend(vueOptions);
   }
   return [VueComponent, vueOptions]
 }
@@ -846,8 +1175,14 @@ function initBehaviors (vueOptions, initBehavior) {
           vueProps.push('name');
           vueProps.push('value');
         } else {
-          vueProps['name'] = String;
-          vueProps['value'] = null;
+          vueProps['name'] = {
+            type: String,
+            default: ''
+          };
+          vueProps['value'] = {
+            type: [String, Number, Boolean, Array, Object, Date],
+            default: ''
+          };
         }
       }
     });
@@ -918,7 +1253,7 @@ function initProperties (props, isBehavior = false, file = '') {
           value = value();
         }
 
-        opts.type = parsePropType(key, opts.type, value, file);
+        opts.type = parsePropType(key, opts.type);
 
         properties[key] = {
           type: PROP_TYPES.indexOf(opts.type) !== -1 ? opts.type : null,
@@ -926,7 +1261,7 @@ function initProperties (props, isBehavior = false, file = '') {
           observer: createObserver(key)
         };
       } else { // content:String
-        const type = parsePropType(key, opts, null, file);
+        const type = parsePropType(key, opts);
         properties[key] = {
           type: PROP_TYPES.indexOf(type) !== -1 ? type : null,
           observer: createObserver(key)
@@ -1001,16 +1336,16 @@ function processEventExtra (vm, extra, event) {
 
   if (Array.isArray(extra) && extra.length) {
     /**
-         *[
-         *    ['data.items', 'data.id', item.data.id],
-         *    ['metas', 'id', meta.id]
-         *],
-         *[
-         *    ['data.items', 'data.id', item.data.id],
-         *    ['metas', 'id', meta.id]
-         *],
-         *'test'
-         */
+     *[
+     *    ['data.items', 'data.id', item.data.id],
+     *    ['metas', 'id', meta.id]
+     *],
+     *[
+     *    ['data.items', 'data.id', item.data.id],
+     *    ['metas', 'id', meta.id]
+     *],
+     *'test'
+     */
     extra.forEach((dataPath, index) => {
       if (typeof dataPath === 'string') {
         if (!dataPath) { // model,prop.sync
@@ -1046,8 +1381,8 @@ function processEventArgs (vm, event, args = [], extra = [], isCustom, methodNam
   let isCustomMPEvent = false; // wxcomponent 组件，传递原始 event 对象
   if (isCustom) { // 自定义事件
     isCustomMPEvent = event.currentTarget &&
-            event.currentTarget.dataset &&
-            event.currentTarget.dataset.comType === 'wx';
+      event.currentTarget.dataset &&
+      event.currentTarget.dataset.comType === 'wx';
     if (!args.length) { // 无参数，直接传入 event 或 detail 数组
       if (isCustomMPEvent) {
         return [event]
@@ -1089,26 +1424,33 @@ const CUSTOM = '^';
 
 function isMatchEventType (eventType, optType) {
   return (eventType === optType) ||
-        (
-          optType === 'regionchange' &&
-            (
-              eventType === 'begin' ||
-                eventType === 'end'
-            )
-        )
+    (
+      optType === 'regionchange' &&
+      (
+        eventType === 'begin' ||
+        eventType === 'end'
+      )
+    )
 }
 
 function handleEvent (event) {
   event = wrapper$1(event);
 
   // [['tap',[['handle',[1,2,a]],['handle1',[1,2,a]]]]]
-  const eventOpts = (event.currentTarget || event.target).dataset.eventOpts;
+  const dataset = (event.currentTarget || event.target).dataset;
+  if (!dataset) {
+    return console.warn(`事件信息不存在`)
+  }
+  const eventOpts = dataset.eventOpts || dataset['event-opts']; // 支付宝 web-view 组件 dataset 非驼峰
   if (!eventOpts) {
     return console.warn(`事件信息不存在`)
   }
 
   // [['handle',[1,2,a]],['handle1',[1,2,a]]]
   const eventType = event.type;
+
+  const ret = [];
+
   eventOpts.forEach(eventOpt => {
     let type = eventOpt[0];
     const eventsArray = eventOpt[1];
@@ -1125,8 +1467,8 @@ function handleEvent (event) {
           let handlerCtx = this.$vm;
           if (
             handlerCtx.$options.generic &&
-                        handlerCtx.$parent &&
-                        handlerCtx.$parent.$parent
+            handlerCtx.$parent &&
+            handlerCtx.$parent.$parent
           ) { // mp-weixin,mp-toutiao 抽象节点模拟 scoped slots
             handlerCtx = handlerCtx.$parent.$parent;
           }
@@ -1140,18 +1482,26 @@ function handleEvent (event) {
             }
             handler.once = true;
           }
-          handler.apply(handlerCtx, processEventArgs(
+          ret.push(handler.apply(handlerCtx, processEventArgs(
             this.$vm,
             event,
             eventArray[1],
             eventArray[2],
             isCustom,
             methodName
-          ));
+          )));
         }
       });
     }
   });
+
+  if (
+    eventType === 'input' &&
+    ret.length === 1 &&
+    typeof ret[0] !== 'undefined'
+  ) {
+    return ret[0]
+  }
 }
 
 const hooks = [
@@ -1165,6 +1515,10 @@ function parseBaseApp (vm, {
   mocks,
   initRefs
 }) {
+  if (vm.$options.store) {
+    Vue.prototype.$store = vm.$options.store;
+  }
+
   Vue.prototype.mpHost = "mp-alipay";
 
   Vue.mixin({
@@ -1194,6 +1548,9 @@ function parseBaseApp (vm, {
 
   const appOptions = {
     onLaunch (args) {
+      if (this.$vm) { // 已经初始化过了，主要是为了百度，百度 onShow 在 onLaunch 之前
+        return
+      }
 
       this.$vm = vm;
 
@@ -1202,6 +1559,8 @@ function parseBaseApp (vm, {
       };
 
       this.$vm.$scope = this;
+      // vm 上也挂载 globalData
+      this.$vm.globalData = this.globalData;
 
       this.$vm._isMounted = true;
       this.$vm.__call_hook('mounted', args);
@@ -1310,13 +1669,13 @@ const customize = cached((str) => {
 
 const isComponent2 = my.canIUse('component2');
 
-const mocks$1 = ['$id'];
+const mocks = ['$id'];
 
-function initRefs$1 () {
+function initRefs () {
 
 }
 
-function initBehavior$1 ({
+function initBehavior ({
   properties
 }) {
   const props = {};
@@ -1330,7 +1689,7 @@ function initBehavior$1 ({
   }
 }
 
-function initRelation$1 (detail) {
+function initRelation (detail) {
   this.props.onVueInit(detail);
 }
 
@@ -1453,13 +1812,13 @@ function createObserver$1 (isDidUpdate) {
 
 const handleLink$1 = (function () {
   if (isComponent2) {
-    return function handleLink$$1 (detail) {
+    return function handleLink$1 (detail) {
       return handleLink.call(this, {
         detail
       })
     }
   }
-  return function handleLink$$1 (detail) {
+  return function handleLink$1 (detail) {
     if (this.$vm && this.$vm._isMounted) { // 父已初始化
       return handleLink.call(this, {
         detail: {
@@ -1491,9 +1850,36 @@ function parseApp (vm) {
     }
   });
 
+  Vue.prototype.$onAliGetAuthorize = function onAliGetAuthorize (method, $event) {
+    my.getPhoneNumber({
+      success: (res) => {
+        $event.type = 'getphonenumber';
+        const response = JSON.parse(res.response).response;
+        if (response.code === '10000') { // success
+          $event.detail.errMsg = 'getPhoneNumber:ok';
+          $event.detail.encryptedData = res.response;
+        } else {
+          $event.detail.errMsg = 'getPhoneNumber:fail Error: ' + res.response;
+        }
+        this[method]($event);
+      },
+      fail: (res) => {
+        $event.type = 'getphonenumber';
+        $event.detail.errMsg = 'getPhoneNumber:fail';
+        this[method]($event);
+      }
+    });
+  };
+
+  Vue.prototype.$onAliAuthError = function $onAliAuthError (method, $event) {
+    $event.type = 'getphonenumber';
+    $event.detail.errMsg = 'getPhoneNumber:fail Error: ' + $event.detail.errorMessage;
+    this[method]($event);
+  };
+
   return parseBaseApp(vm, {
-    mocks: mocks$1,
-    initRefs: initRefs$1
+    mocks,
+    initRefs
   })
 }
 
@@ -1518,7 +1904,7 @@ function parsePage (vuePageOptions) {
   let [VueComponent, vueOptions] = initVueComponent(Vue, vuePageOptions);
 
   const pageOptions = {
-    mixins: initBehaviors(vueOptions, initBehavior$1),
+    mixins: initBehaviors(vueOptions, initBehavior),
     data: initData(vueOptions, Vue.prototype),
     onLoad (args) {
       const properties = this.props;
@@ -1555,7 +1941,7 @@ function parsePage (vuePageOptions) {
     __l: handleLink$1
   };
 
-  initHooks(pageOptions, hooks$1);
+  initHooks(pageOptions, hooks$1, vuePageOptions);
 
   return pageOptions
 }
@@ -1582,7 +1968,7 @@ function initVm (VueComponent) {
 
   if (isComponent2) {
     // 处理父子关系
-    initRelation$1.call(this, {
+    initRelation.call(this, {
       vuePid: this._$vuePid,
       vueOptions: options
     });
@@ -1594,7 +1980,7 @@ function initVm (VueComponent) {
     this.$vm.$mount();
   } else {
     // 处理父子关系
-    initRelation$1.call(this, {
+    initRelation.call(this, {
       vuePid: this._$vuePid,
       vueOptions: options,
       VueComponent,
@@ -1633,11 +2019,17 @@ function parseComponent (vueComponentOptions) {
   });
 
   const componentOptions = {
-    mixins: initBehaviors(vueOptions, initBehavior$1),
+    mixins: initBehaviors(vueOptions, initBehavior),
     data: initData(vueOptions, Vue.prototype),
     props,
     didMount () {
-      initVm.call(this, VueComponent);
+      if (my.dd) { // 钉钉小程序底层基础库有 bug,组件嵌套使用时,在 didMount 中无法及时调用 props 中的方法
+        setTimeout(() => {
+          initVm.call(this, VueComponent);
+        }, 4);
+      } else {
+        initVm.call(this, VueComponent);
+      }
 
       initSpecialMethods(this);
 
@@ -1690,11 +2082,14 @@ canIUses.forEach(canIUseApi => {
 
 let uni = {};
 
-if (typeof Proxy !== 'undefined') {
+if (typeof Proxy !== 'undefined' && "mp-alipay" !== 'app-plus') {
   uni = new Proxy({}, {
     get (target, name) {
-      if (name === 'upx2px') {
-        return upx2px
+      if (target[name]) {
+        return target[name]
+      }
+      if (baseApi[name]) {
+        return baseApi[name]
       }
       if (api[name]) {
         return promisify(name, api[name])
@@ -1714,10 +2109,16 @@ if (typeof Proxy !== 'undefined') {
         return
       }
       return promisify(name, wrapper(name, my[name]))
+    },
+    set (target, name, value) {
+      target[name] = value;
+      return true
     }
   });
 } else {
-  uni.upx2px = upx2px;
+  Object.keys(baseApi).forEach(name => {
+    uni[name] = baseApi[name];
+  });
 
   {
     Object.keys(todoApis).forEach(name => {
@@ -1750,4 +2151,4 @@ my.createComponent = createComponent;
 var uni$1 = uni;
 
 export default uni$1;
-export { createApp, createPage, createComponent };
+export { createApp, createComponent, createPage };

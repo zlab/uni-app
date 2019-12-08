@@ -1,6 +1,5 @@
 import {
   isPage,
-  isIOS,
   initRelation
 } from './util'
 
@@ -26,17 +25,23 @@ export default function parsePage (vuePageOptions) {
     initRelation
   })
 
+  const newLifecycle = swan.canIUse('lifecycle-2-0')
+
+  // 纠正百度小程序新生命周期(2.0)methods:onShow在methods:onLoad之前触发的问题
+  if (newLifecycle) {
+    delete pageOptions.methods.onShow
+  }
+
   pageOptions.methods.onLoad = function onLoad (args) {
     // 百度 onLoad 在 attached 之前触发，先存储 args, 在 attached 里边触发 onLoad
-    this.pageinstance._$args = args
-
-    if (isIOS) {
-      this.$vm.$mp.query = this.pageinstance._$args // 兼容 mpvue
-      this.$vm.__call_hook('onLoad', this.pageinstance._$args)
+    if (this.$vm) {
+      this.$vm.$mp.query = args
+      this.$vm.__call_hook('onLoad', args)
+      this.$vm.__call_hook('onShow')
+    } else {
+      this.pageinstance._$args = args
     }
   }
-  // TODO  目前版本 百度 Component 作为页面时，methods 中的 onShow 不触发
-  delete pageOptions.methods.onShow
 
   pageOptions.methods.onUnload = function onUnload () {
     this.$vm.__call_hook('onUnload')

@@ -40,7 +40,198 @@ const camelize = cached((str) => {
   return str.replace(camelizeRE, (_, c) => c ? c.toUpperCase() : '')
 });
 
-const SYNC_API_RE = /^\$|getSubNVueById|requireNativePlugin|upx2px|hideKeyboard|canIUse|^create|Sync$|Manager$|base64ToArrayBuffer|arrayBufferToBase64/;
+const HOOKS = [
+  'invoke',
+  'success',
+  'fail',
+  'complete',
+  'returnValue'
+];
+
+const globalInterceptors = {};
+const scopedInterceptors = {};
+
+function mergeHook (parentVal, childVal) {
+  const res = childVal
+    ? parentVal
+      ? parentVal.concat(childVal)
+      : Array.isArray(childVal)
+        ? childVal : [childVal]
+    : parentVal;
+  return res
+    ? dedupeHooks(res)
+    : res
+}
+
+function dedupeHooks (hooks) {
+  const res = [];
+  for (let i = 0; i < hooks.length; i++) {
+    if (res.indexOf(hooks[i]) === -1) {
+      res.push(hooks[i]);
+    }
+  }
+  return res
+}
+
+function removeHook (hooks, hook) {
+  const index = hooks.indexOf(hook);
+  if (index !== -1) {
+    hooks.splice(index, 1);
+  }
+}
+
+function mergeInterceptorHook (interceptor, option) {
+  Object.keys(option).forEach(hook => {
+    if (HOOKS.indexOf(hook) !== -1 && isFn(option[hook])) {
+      interceptor[hook] = mergeHook(interceptor[hook], option[hook]);
+    }
+  });
+}
+
+function removeInterceptorHook (interceptor, option) {
+  if (!interceptor || !option) {
+    return
+  }
+  Object.keys(option).forEach(hook => {
+    if (HOOKS.indexOf(hook) !== -1 && isFn(option[hook])) {
+      removeHook(interceptor[hook], option[hook]);
+    }
+  });
+}
+
+function addInterceptor (method, option) {
+  if (typeof method === 'string' && isPlainObject(option)) {
+    mergeInterceptorHook(scopedInterceptors[method] || (scopedInterceptors[method] = {}), option);
+  } else if (isPlainObject(method)) {
+    mergeInterceptorHook(globalInterceptors, method);
+  }
+}
+
+function removeInterceptor (method, option) {
+  if (typeof method === 'string') {
+    if (isPlainObject(option)) {
+      removeInterceptorHook(scopedInterceptors[method], option);
+    } else {
+      delete scopedInterceptors[method];
+    }
+  } else if (isPlainObject(method)) {
+    removeInterceptorHook(globalInterceptors, method);
+  }
+}
+
+function wrapperHook (hook) {
+  return function (data) {
+    return hook(data) || data
+  }
+}
+
+function isPromise (obj) {
+  return !!obj && (typeof obj === 'object' || typeof obj === 'function') && typeof obj.then === 'function'
+}
+
+function queue (hooks, data) {
+  let promise = false;
+  for (let i = 0; i < hooks.length; i++) {
+    const hook = hooks[i];
+    if (promise) {
+      promise = Promise.then(wrapperHook(hook));
+    } else {
+      const res = hook(data);
+      if (isPromise(res)) {
+        promise = Promise.resolve(res);
+      }
+      if (res === false) {
+        return {
+          then () {}
+        }
+      }
+    }
+  }
+  return promise || {
+    then (callback) {
+      return callback(data)
+    }
+  }
+}
+
+function wrapperOptions (interceptor, options = {}) {
+  ['success', 'fail', 'complete'].forEach(name => {
+    if (Array.isArray(interceptor[name])) {
+      const oldCallback = options[name];
+      options[name] = function callbackInterceptor (res) {
+        queue(interceptor[name], res).then((res) => {
+          /* eslint-disable no-mixed-operators */
+          return isFn(oldCallback) && oldCallback(res) || res
+        });
+      };
+    }
+  });
+  return options
+}
+
+function wrapperReturnValue (method, returnValue) {
+  const returnValueHooks = [];
+  if (Array.isArray(globalInterceptors.returnValue)) {
+    returnValueHooks.push(...globalInterceptors.returnValue);
+  }
+  const interceptor = scopedInterceptors[method];
+  if (interceptor && Array.isArray(interceptor.returnValue)) {
+    returnValueHooks.push(...interceptor.returnValue);
+  }
+  returnValueHooks.forEach(hook => {
+    returnValue = hook(returnValue) || returnValue;
+  });
+  return returnValue
+}
+
+function getApiInterceptorHooks (method) {
+  const interceptor = Object.create(null);
+  Object.keys(globalInterceptors).forEach(hook => {
+    if (hook !== 'returnValue') {
+      interceptor[hook] = globalInterceptors[hook].slice();
+    }
+  });
+  const scopedInterceptor = scopedInterceptors[method];
+  if (scopedInterceptor) {
+    Object.keys(scopedInterceptor).forEach(hook => {
+      if (hook !== 'returnValue') {
+        interceptor[hook] = (interceptor[hook] || []).concat(scopedInterceptor[hook]);
+      }
+    });
+  }
+  return interceptor
+}
+
+function invokeApi (method, api, options, ...params) {
+  const interceptor = getApiInterceptorHooks(method);
+  if (interceptor && Object.keys(interceptor).length) {
+    if (Array.isArray(interceptor.invoke)) {
+      const res = queue(interceptor.invoke, options);
+      return res.then((options) => {
+        return api(wrapperOptions(interceptor, options), ...params)
+      })
+    } else {
+      return api(wrapperOptions(interceptor, options), ...params)
+    }
+  }
+  return api(options, ...params)
+}
+
+const promiseInterceptor = {
+  returnValue (res) {
+    if (!isPromise(res)) {
+      return res
+    }
+    return res.then(res => {
+      return res[1]
+    }).catch(res => {
+      return res[0]
+    })
+  }
+};
+
+const SYNC_API_RE =
+  /^\$|getMenuButtonBoundingClientRect|^report|interceptors|Interceptor$|getSubNVueById|requireNativePlugin|upx2px|hideKeyboard|canIUse|^create|Sync$|Manager$|base64ToArrayBuffer|arrayBufferToBase64/;
 
 const CONTEXT_API_RE = /^create|Manager$/;
 
@@ -54,7 +245,7 @@ function isSyncApi (name) {
 }
 
 function isCallbackApi (name) {
-  return CALLBACK_API_RE.test(name)
+  return CALLBACK_API_RE.test(name) && name !== 'onPush'
 }
 
 function handlePromise (promise) {
@@ -67,8 +258,8 @@ function handlePromise (promise) {
 function shouldPromise (name) {
   if (
     isContextApi(name) ||
-        isSyncApi(name) ||
-        isCallbackApi(name)
+    isSyncApi(name) ||
+    isCallbackApi(name)
   ) {
     return false
   }
@@ -81,10 +272,10 @@ function promisify (name, api) {
   }
   return function promiseApi (options = {}, ...params) {
     if (isFn(options.success) || isFn(options.fail) || isFn(options.complete)) {
-      return api(options, ...params)
+      return wrapperReturnValue(name, invokeApi(name, api, options, ...params))
     }
-    return handlePromise(new Promise((resolve, reject) => {
-      api(Object.assign({}, options, {
+    return wrapperReturnValue(name, handlePromise(new Promise((resolve, reject) => {
+      invokeApi(name, api, Object.assign({}, options, {
         success: resolve,
         fail: reject
       }), ...params);
@@ -100,7 +291,7 @@ function promisify (name, api) {
           )
         };
       }
-    }))
+    })))
   }
 }
 
@@ -145,6 +336,19 @@ function upx2px (number, newDeviceWidth) {
   }
   return number < 0 ? -result : result
 }
+
+const interceptors = {
+  promiseInterceptor
+};
+
+
+
+var baseApi = /*#__PURE__*/Object.freeze({
+  upx2px: upx2px,
+  interceptors: interceptors,
+  addInterceptor: addInterceptor,
+  removeInterceptor: removeInterceptor
+});
 
 var previewImage = {
   args (fromArgs) {
@@ -211,7 +415,8 @@ const todos = [
   'stopBeaconDiscovery',
   'hideShareMenu',
   'onWindowResize',
-  'offWindowResize'
+  'offWindowResize',
+  'vibrate'
 ];
 
 // 存在兼容性的 API 列表
@@ -222,6 +427,16 @@ function createTodoMethod (contextName, methodName) {
     console.error(`百度小程序 ${contextName}暂不支持${methodName}`);
   }
 }
+
+function _handleEnvInfo (result) {
+  result.miniProgram = {
+    appId: result.appKey
+  };
+  result.plugin = {
+    version: result.sdkVersion
+  };
+}
+
 // 需要做转换的 API 列表
 const protocols = {
   request: {
@@ -229,9 +444,14 @@ const protocols = {
       // TODO
       // data 不支持 ArrayBuffer
       // method 不支持 TRACE, CONNECT
-      // dataType 可取值为 string/json
       return {
-        method: 'method'
+        method: 'method',
+        dataType (type) {
+          return {
+            name: 'dataType',
+            value: type === 'json' ? type : 'string'
+          }
+        }
       }
     }
   },
@@ -270,6 +490,10 @@ const protocols = {
   },
   showShareMenu: {
     name: 'openShare'
+  },
+  getAccountInfoSync: {
+    name: 'getEnvInfoSync',
+    returnValue: _handleEnvInfo
   }
 };
 
@@ -355,6 +579,7 @@ function wrapper (methodName, method) {
 const todoApis = Object.create(null);
 
 const TODOS = [
+  'onTabBarMidButtonTap',
   'subscribePush',
   'unsubscribePush',
   'onPush',
@@ -444,8 +669,6 @@ function $emit () {
   return apply(getEmitter(), '$emit', [...arguments])
 }
 
-
-
 var eventApi = /*#__PURE__*/Object.freeze({
   $on: $on,
   $off: $off,
@@ -533,22 +756,56 @@ function initMocks (vm, mocks) {
   });
 }
 
-function initHooks (mpOptions, hooks) {
+function hasHook (hook, vueOptions) {
+  if (!vueOptions) {
+    return true
+  }
+
+  if (Vue.options && Array.isArray(Vue.options[hook])) {
+    return true
+  }
+
+  vueOptions = vueOptions.default || vueOptions;
+
+  if (isFn(vueOptions)) {
+    if (isFn(vueOptions.extendOptions[hook])) {
+      return true
+    }
+    if (vueOptions.super &&
+      vueOptions.super.options &&
+      Array.isArray(vueOptions.super.options[hook])) {
+      return true
+    }
+    return false
+  }
+
+  if (isFn(vueOptions[hook])) {
+    return true
+  }
+  const mixins = vueOptions.mixins;
+  if (Array.isArray(mixins)) {
+    return !!mixins.find(mixin => hasHook(hook, mixin))
+  }
+}
+
+function initHooks (mpOptions, hooks, vueOptions) {
   hooks.forEach(hook => {
-    mpOptions[hook] = function (args) {
-      return this.$vm && this.$vm.__call_hook(hook, args)
-    };
+    if (hasHook(hook, vueOptions)) {
+      mpOptions[hook] = function (args) {
+        return this.$vm && this.$vm.__call_hook(hook, args)
+      };
+    }
   });
 }
 
-function initVueComponent (Vue$$1, vueOptions) {
+function initVueComponent (Vue, vueOptions) {
   vueOptions = vueOptions.default || vueOptions;
   let VueComponent;
   if (isFn(vueOptions)) {
     VueComponent = vueOptions;
     vueOptions = VueComponent.extendOptions;
   } else {
-    VueComponent = Vue$$1.extend(vueOptions);
+    VueComponent = Vue.extend(vueOptions);
   }
   return [VueComponent, vueOptions]
 }
@@ -637,8 +894,14 @@ function initBehaviors (vueOptions, initBehavior) {
           vueProps.push('name');
           vueProps.push('value');
         } else {
-          vueProps['name'] = String;
-          vueProps['value'] = null;
+          vueProps['name'] = {
+            type: String,
+            default: ''
+          };
+          vueProps['value'] = {
+            type: [String, Number, Boolean, Array, Object, Date],
+            default: ''
+          };
         }
       }
     });
@@ -672,10 +935,10 @@ function parsePropType (key, type, defaultValue, file) {
   {
     if (
       defaultValue === false &&
-            Array.isArray(type) &&
-            type.length === 2 &&
-            type.indexOf(String) !== -1 &&
-            type.indexOf(Boolean) !== -1
+      Array.isArray(type) &&
+      type.length === 2 &&
+      type.indexOf(String) !== -1 &&
+      type.indexOf(Boolean) !== -1
     ) { // [String,Boolean]=>Boolean
       if (file) {
         console.warn(
@@ -762,8 +1025,8 @@ function wrapper$1 (event) {
   { // mp-baidu，checked=>value
     if (
       isPlainObject(event.detail) &&
-            hasOwn(event.detail, 'checked') &&
-            !hasOwn(event.detail, 'value')
+      hasOwn(event.detail, 'checked') &&
+      !hasOwn(event.detail, 'value')
     ) {
       event.detail.value = event.detail.checked;
     }
@@ -818,16 +1081,16 @@ function processEventExtra (vm, extra, event) {
 
   if (Array.isArray(extra) && extra.length) {
     /**
-         *[
-         *    ['data.items', 'data.id', item.data.id],
-         *    ['metas', 'id', meta.id]
-         *],
-         *[
-         *    ['data.items', 'data.id', item.data.id],
-         *    ['metas', 'id', meta.id]
-         *],
-         *'test'
-         */
+     *[
+     *    ['data.items', 'data.id', item.data.id],
+     *    ['metas', 'id', meta.id]
+     *],
+     *[
+     *    ['data.items', 'data.id', item.data.id],
+     *    ['metas', 'id', meta.id]
+     *],
+     *'test'
+     */
     extra.forEach((dataPath, index) => {
       if (typeof dataPath === 'string') {
         if (!dataPath) { // model,prop.sync
@@ -863,8 +1126,8 @@ function processEventArgs (vm, event, args = [], extra = [], isCustom, methodNam
   let isCustomMPEvent = false; // wxcomponent 组件，传递原始 event 对象
   if (isCustom) { // 自定义事件
     isCustomMPEvent = event.currentTarget &&
-            event.currentTarget.dataset &&
-            event.currentTarget.dataset.comType === 'wx';
+      event.currentTarget.dataset &&
+      event.currentTarget.dataset.comType === 'wx';
     if (!args.length) { // 无参数，直接传入 event 或 detail 数组
       if (isCustomMPEvent) {
         return [event]
@@ -906,26 +1169,33 @@ const CUSTOM = '^';
 
 function isMatchEventType (eventType, optType) {
   return (eventType === optType) ||
-        (
-          optType === 'regionchange' &&
-            (
-              eventType === 'begin' ||
-                eventType === 'end'
-            )
-        )
+    (
+      optType === 'regionchange' &&
+      (
+        eventType === 'begin' ||
+        eventType === 'end'
+      )
+    )
 }
 
 function handleEvent (event) {
   event = wrapper$1(event);
 
   // [['tap',[['handle',[1,2,a]],['handle1',[1,2,a]]]]]
-  const eventOpts = (event.currentTarget || event.target).dataset.eventOpts;
+  const dataset = (event.currentTarget || event.target).dataset;
+  if (!dataset) {
+    return console.warn(`事件信息不存在`)
+  }
+  const eventOpts = dataset.eventOpts || dataset['event-opts']; // 支付宝 web-view 组件 dataset 非驼峰
   if (!eventOpts) {
     return console.warn(`事件信息不存在`)
   }
 
   // [['handle',[1,2,a]],['handle1',[1,2,a]]]
   const eventType = event.type;
+
+  const ret = [];
+
   eventOpts.forEach(eventOpt => {
     let type = eventOpt[0];
     const eventsArray = eventOpt[1];
@@ -942,8 +1212,8 @@ function handleEvent (event) {
           let handlerCtx = this.$vm;
           if (
             handlerCtx.$options.generic &&
-                        handlerCtx.$parent &&
-                        handlerCtx.$parent.$parent
+            handlerCtx.$parent &&
+            handlerCtx.$parent.$parent
           ) { // mp-weixin,mp-toutiao 抽象节点模拟 scoped slots
             handlerCtx = handlerCtx.$parent.$parent;
           }
@@ -957,18 +1227,26 @@ function handleEvent (event) {
             }
             handler.once = true;
           }
-          handler.apply(handlerCtx, processEventArgs(
+          ret.push(handler.apply(handlerCtx, processEventArgs(
             this.$vm,
             event,
             eventArray[1],
             eventArray[2],
             isCustom,
             methodName
-          ));
+          )));
         }
       });
     }
   });
+
+  if (
+    eventType === 'input' &&
+    ret.length === 1 &&
+    typeof ret[0] !== 'undefined'
+  ) {
+    return ret[0]
+  }
 }
 
 const hooks = [
@@ -982,6 +1260,10 @@ function parseBaseApp (vm, {
   mocks,
   initRefs
 }) {
+  if (vm.$options.store) {
+    Vue.prototype.$store = vm.$options.store;
+  }
+
   Vue.prototype.mpHost = "mp-baidu";
 
   Vue.mixin({
@@ -1011,6 +1293,9 @@ function parseBaseApp (vm, {
 
   const appOptions = {
     onLaunch (args) {
+      if (this.$vm) { // 已经初始化过了，主要是为了百度，百度 onShow 在 onLaunch 之前
+        return
+      }
 
       this.$vm = vm;
 
@@ -1019,6 +1304,8 @@ function parseBaseApp (vm, {
       };
 
       this.$vm.$scope = this;
+      // vm 上也挂载 globalData
+      this.$vm.globalData = this.globalData;
 
       this.$vm._isMounted = true;
       this.$vm.__call_hook('mounted', args);
@@ -1097,23 +1384,29 @@ function handleLink (event) {
   vueOptions.parent = parentVm;
 }
 
-const mocks$1 = ['nodeId'];
+const mocks = ['nodeId', 'componentName'];
 
-function isPage$1 () {
+function isPage () {
   return !this.ownerId
 }
 
-function initRelation$1 (detail) {
+function initRelation (detail) {
   this.dispatch('__l', detail);
 }
 
-const isIOS$1 = swan.getSystemInfoSync().platform === 'ios';
-
 function parseApp (vm) {
-  return parseBaseApp(vm, {
-    mocks: mocks$1,
+  // 百度 onShow 竟然会在 onLaunch 之前
+  const appOptions = parseBaseApp(vm, {
+    mocks,
     initRefs
-  })
+  });
+  appOptions.onShow = function onShow (args) {
+    if (!this.$vm) {
+      this.onLaunch(args);
+    }
+    this.$vm.__call_hook('onShow', args);
+  };
+  return appOptions
 }
 
 function createApp (vm) {
@@ -1122,16 +1415,18 @@ function createApp (vm) {
 }
 
 function parseBaseComponent (vueComponentOptions, {
-  isPage: isPage$$1,
-  initRelation: initRelation$$1
+  isPage,
+  initRelation
 } = {}) {
   let [VueComponent, vueOptions] = initVueComponent(Vue, vueComponentOptions);
 
+  const options = {
+    multipleSlots: true,
+    addGlobalClass: true
+  };
+
   const componentOptions = {
-    options: {
-      multipleSlots: true,
-      addGlobalClass: true
-    },
+    options,
     data: initData(vueOptions, Vue.prototype),
     behaviors: initBehaviors(vueOptions, initBehavior),
     properties: initProperties(vueOptions.props, false, vueOptions.__file),
@@ -1140,7 +1435,7 @@ function parseBaseComponent (vueComponentOptions, {
         const properties = this.properties;
 
         const options = {
-          mpType: isPage$$1.call(this) ? 'page' : 'component',
+          mpType: isPage.call(this) ? 'page' : 'component',
           mpInstance: this,
           propsData: properties
         };
@@ -1148,7 +1443,7 @@ function parseBaseComponent (vueComponentOptions, {
         initVueIds(properties.vueId, this);
 
         // 处理父子关系
-        initRelation$$1.call(this, {
+        initRelation.call(this, {
           vuePid: this._$vuePid,
           vueOptions: options
         });
@@ -1192,34 +1487,62 @@ function parseBaseComponent (vueComponentOptions, {
     }
   };
 
-  if (isPage$$1) {
+  if (Array.isArray(vueOptions.wxsCallMethods)) {
+    vueOptions.wxsCallMethods.forEach(callMethod => {
+      componentOptions.methods[callMethod] = function (args) {
+        return this.$vm[callMethod](args)
+      };
+    });
+  }
+
+  if (isPage) {
     return componentOptions
   }
   return [componentOptions, VueComponent]
 }
 
+const newLifecycle = swan.canIUse('lifecycle-2-0');
+
 function parseComponent (vueOptions) {
   const componentOptions = parseBaseComponent(vueOptions, {
-    isPage: isPage$1,
-    initRelation: initRelation$1
+    isPage,
+    initRelation
   });
 
+  // 关于百度小程序新生命周期(2.0)的说明(组件作为页面时):
+  // lifetimes:attached --> methods:onShow --> methods:onLoad --> methods:onReady
+  // 这里在新生命周期强制将onShow挪到onLoad之后触发,另外一处修改在page-parser.js
   const oldAttached = componentOptions.lifetimes.attached;
-
   componentOptions.lifetimes.attached = function attached () {
     oldAttached.call(this);
-    if (isPage$1.call(this)) { // 百度 onLoad 在 attached 之前触发
+    if (isPage.call(this)) { // 百度 onLoad 在 attached 之前触发
       // 百度 当组件作为页面时 pageinstancce 不是原来组件的 instance
       this.pageinstance.$vm = this.$vm;
-
-      if (!isIOS$1) {
-        this.$vm.$mp.query = this.pageinstance._$args; // 兼容 mpvue
+      if (hasOwn(this.pageinstance, '_$args')) {
+        this.$vm.$mp.query = this.pageinstance._$args;
         this.$vm.__call_hook('onLoad', this.pageinstance._$args);
+        this.$vm.__call_hook('onShow');
+        delete this.pageinstance._$args;
       }
-      // TODO  目前版本 百度 Component 作为页面时，methods 中的 onShow 不触发
-      this.$vm.__call_hook('onShow');
+    } else {
+      // 百度小程序组件不触发methods内的onReady
+      if (this.$vm) {
+        this.$vm._isMounted = true;
+        this.$vm.__call_hook('mounted');
+      }
     }
   };
+
+  if (newLifecycle) {
+    delete componentOptions.lifetimes.ready;
+    componentOptions.methods.onReady = function () {
+      if (this.$vm) {
+        this.$vm._isMounted = true;
+        this.$vm.__call_hook('mounted');
+        this.$vm.__call_hook('onReady');
+      }
+    };
+  }
 
   componentOptions.messages = {
     '__l': componentOptions.methods['__l']
@@ -1241,12 +1564,9 @@ function parseBasePage (vuePageOptions, {
   isPage,
   initRelation
 }) {
-  const pageOptions = parseComponent(vuePageOptions, {
-    isPage,
-    initRelation
-  });
+  const pageOptions = parseComponent(vuePageOptions);
 
-  initHooks(pageOptions.methods, hooks$1);
+  initHooks(pageOptions.methods, hooks$1, vuePageOptions);
 
   pageOptions.methods.onLoad = function (args) {
     this.$vm.$mp.query = args; // 兼容 mpvue
@@ -1272,21 +1592,27 @@ function onPageUnload ($vm) {
 
 function parsePage (vuePageOptions) {
   const pageOptions = parseBasePage(vuePageOptions, {
-    isPage: isPage$1,
-    initRelation: initRelation$1
+    isPage,
+    initRelation
   });
+
+  const newLifecycle = swan.canIUse('lifecycle-2-0');
+
+  // 纠正百度小程序新生命周期(2.0)methods:onShow在methods:onLoad之前触发的问题
+  if (newLifecycle) {
+    delete pageOptions.methods.onShow;
+  }
 
   pageOptions.methods.onLoad = function onLoad (args) {
     // 百度 onLoad 在 attached 之前触发，先存储 args, 在 attached 里边触发 onLoad
-    this.pageinstance._$args = args;
-
-    if (isIOS$1) {
-      this.$vm.$mp.query = this.pageinstance._$args; // 兼容 mpvue
-      this.$vm.__call_hook('onLoad', this.pageinstance._$args);
+    if (this.$vm) {
+      this.$vm.$mp.query = args;
+      this.$vm.__call_hook('onLoad', args);
+      this.$vm.__call_hook('onShow');
+    } else {
+      this.pageinstance._$args = args;
     }
   };
-  // TODO  目前版本 百度 Component 作为页面时，methods 中的 onShow 不触发
-  delete pageOptions.methods.onShow;
 
   pageOptions.methods.onUnload = function onUnload () {
     this.$vm.__call_hook('onUnload');
@@ -1322,11 +1648,14 @@ canIUses.forEach(canIUseApi => {
 
 let uni = {};
 
-if (typeof Proxy !== 'undefined') {
+if (typeof Proxy !== 'undefined' && "mp-baidu" !== 'app-plus') {
   uni = new Proxy({}, {
     get (target, name) {
-      if (name === 'upx2px') {
-        return upx2px
+      if (target[name]) {
+        return target[name]
+      }
+      if (baseApi[name]) {
+        return baseApi[name]
       }
       if (api[name]) {
         return promisify(name, api[name])
@@ -1346,10 +1675,16 @@ if (typeof Proxy !== 'undefined') {
         return
       }
       return promisify(name, wrapper(name, swan[name]))
+    },
+    set (target, name, value) {
+      target[name] = value;
+      return true
     }
   });
 } else {
-  uni.upx2px = upx2px;
+  Object.keys(baseApi).forEach(name => {
+    uni[name] = baseApi[name];
+  });
 
   {
     Object.keys(todoApis).forEach(name => {
@@ -1382,4 +1717,4 @@ swan.createComponent = createComponent;
 var uni$1 = uni;
 
 export default uni$1;
-export { createApp, createPage, createComponent };
+export { createApp, createComponent, createPage };

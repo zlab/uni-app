@@ -1,4 +1,4 @@
-export const mocks = ['nodeId']
+export const mocks = ['nodeId', 'componentName']
 
 export function isPage () {
   return !this.ownerId
@@ -7,5 +7,3 @@ export function isPage () {
 export function initRelation (detail) {
   this.dispatch('__l', detail)
 }
-
-export const isIOS = swan.getSystemInfoSync().platform === 'ios'

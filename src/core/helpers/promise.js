@@ -2,7 +2,13 @@ import {
   isFn
 } from 'uni-shared'
 
-const SYNC_API_RE = /^\$|getSubNVueById|requireNativePlugin|upx2px|hideKeyboard|canIUse|^create|Sync$|Manager$|base64ToArrayBuffer|arrayBufferToBase64/
+import {
+  invokeApi,
+  wrapperReturnValue
+} from './interceptor'
+
+const SYNC_API_RE =
+  /^\$|getMenuButtonBoundingClientRect|^report|interceptors|Interceptor$|getSubNVueById|requireNativePlugin|upx2px|hideKeyboard|canIUse|^create|Sync$|Manager$|base64ToArrayBuffer|arrayBufferToBase64/
 
 const CONTEXT_API_RE = /^create|Manager$/
 
@@ -18,7 +24,7 @@ export function isSyncApi (name) {
 }
 
 export function isCallbackApi (name) {
-  return CALLBACK_API_RE.test(name)
+  return CALLBACK_API_RE.test(name) && name !== 'onPush'
 }
 
 export function isTaskApi (name) {
@@ -35,8 +41,8 @@ function handlePromise (promise) {
 export function shouldPromise (name) {
   if (
     isContextApi(name) ||
-        isSyncApi(name) ||
-        isCallbackApi(name)
+    isSyncApi(name) ||
+    isCallbackApi(name)
   ) {
     return false
   }
@@ -49,10 +55,10 @@ export function promisify (name, api) {
   }
   return function promiseApi (options = {}, ...params) {
     if (isFn(options.success) || isFn(options.fail) || isFn(options.complete)) {
-      return api(options, ...params)
+      return wrapperReturnValue(name, invokeApi(name, api, options, ...params))
     }
-    return handlePromise(new Promise((resolve, reject) => {
-      api(Object.assign({}, options, {
+    return wrapperReturnValue(name, handlePromise(new Promise((resolve, reject) => {
+      invokeApi(name, api, Object.assign({}, options, {
         success: resolve,
         fail: reject
       }), ...params)
@@ -68,6 +74,6 @@ export function promisify (name, api) {
           )
         }
       }
-    }))
+    })))
   }
 }

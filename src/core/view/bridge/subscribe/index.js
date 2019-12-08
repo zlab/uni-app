@@ -1,8 +1,11 @@
 import {
-  isFn,
   isPlainObject,
   supportsPassive
 } from 'uni-shared'
+
+import {
+  hasLifecycleHook
+} from 'uni-helpers/index'
 
 import {
   NAVBAR_HEIGHT,
@@ -15,7 +18,7 @@ import {
   createScrollListener
 } from './scroll'
 
-import requestComponentInfo from './request-component-info'
+import subscribeApis from 'uni-api-subscribe'
 
 const passiveOptions = supportsPassive ? {
   passive: false
@@ -24,7 +27,8 @@ const passiveOptions = supportsPassive ? {
 function updateCssVar (vm) {
   if (uni.canIUse('css.var')) {
     const pageVm = vm.$parent.$parent
-    const windowTop = pageVm.showNavigationBar && pageVm.navigationBar.type !== 'transparent' ? (NAVBAR_HEIGHT + 'px')
+    const windowTop = pageVm.showNavigationBar && pageVm.navigationBar.type !== 'transparent' && pageVm.navigationBar.type !== 'float' ? (NAVBAR_HEIGHT +
+        'px')
       : '0px'
     const windowBottom = getApp().$children[0].showTabBar ? (TABBAR_HEIGHT + 'px') : '0px'
     const style = document.documentElement.style
@@ -36,7 +40,9 @@ function updateCssVar (vm) {
 }
 
 export default function initSubscribe (subscribe) {
-  subscribe('requestComponentInfo', requestComponentInfo)
+  Object.keys(subscribeApis).forEach(name => {
+    subscribe(name, subscribeApis[name])
+  })
 
   subscribe('pageScrollTo', pageScrollTo)
 
@@ -64,11 +70,12 @@ export default function initSubscribe (subscribe) {
         document.addEventListener('touchmove', disableScrollListener, passiveOptions)
       }
 
-      const enablePageScroll = isFn(vm.$options.onPageScroll)
-      const enablePageReachBottom = isFn(vm.$options.onReachBottom)
+      const enablePageScroll = hasLifecycleHook(vm.$options, 'onPageScroll')
+      const enablePageReachBottom = hasLifecycleHook(vm.$options, 'onReachBottom')
       const onReachBottomDistance = pageVm.onReachBottomDistance
 
-      const enableTransparentTitleNView = isPlainObject(pageVm.titleNView) && pageVm.titleNView.type === 'transparent'
+      const enableTransparentTitleNView = (isPlainObject(pageVm.titleNView) && pageVm.titleNView.type ===
+        'transparent') || (isPlainObject(pageVm.navigationBar) && pageVm.navigationBar.type === 'transparent')
 
       if (scrollListener) {
         document.removeEventListener('scroll', scrollListener)
@@ -81,9 +88,9 @@ export default function initSubscribe (subscribe) {
           onReachBottomDistance,
           enableTransparentTitleNView
         })
-        setTimeout(function () { // 避免监听太早，直接触发了 scroll
+        requestAnimationFrame(function () { // 避免监听太早，直接触发了 scroll
           document.addEventListener('scroll', scrollListener)
-        }, 10)
+        })
       }
     })
   }
